@@ -1,0 +1,97 @@
+Goal: a single Linux server hosts a website reachable at https://www.foobar.com
+.
+Stack: Nginx (web server) → Application server (PHP-FPM) → MySQL (database).
+DNS: foobar.com with www A record → 8.8.8.8.
+
+Whiteboard diagram (ASCII)
+[ User's Browser ]
+       |
+       | 1) https://www.foobar.com/
+       v
++----------------- DNS ------------------+
+| Zone: foobar.com                       |
+|   www  IN  A  8.8.8.8                  |
++----------------------------------------+
+       |
+       v   TCP 443 (HTTPS) / 80 (HTTP)
++========================================+
+|       Single Server (IP: 8.8.8.8)      |
+|       OS: Linux                        |
+|                                        |
+|  [ Nginx ]  <-- Web server             |
+|    - TLS termination (HTTPS)           |
+|    - Serve static files                |
+|    - Reverse proxy to app server       |
+|          |                             |
+|          v  (Unix socket/TCP 9000)     |
+|  [ PHP-FPM ] <-- Application server    |
+|    - Runs app code (your code base)    |
+|    - Talks to database                 |
+|          |  TCP 3306                   |
+|          v                             |
+|  [ MySQL ]  <-- Database               |
+|                                        |
+|  App files: /var/www/foobar            |
++========================================+
+
+Request flow (short)
+
+User enters www.foobar.com.
+
+DNS returns 8.8.8.8 for www.
+
+Browser connects to 8.8.8.8 (TLS on 443).
+
+Nginx serves static files or proxies dynamic requests to PHP-FPM.
+
+PHP-FPM executes app code, queries MySQL if needed.
+
+Response goes back via Nginx → user.
+
+Required components (what each is/does)
+
+Server: A (virtual/physical) computer at 8.8.8.8 running Linux that hosts Nginx, the app server, your code, and MySQL.
+
+Domain name (foobar.com): Human-readable name that maps to IPs so users don’t memorize numbers.
+
+Type of DNS record for www in www.foobar.com: A record pointing to 8.8.8.8.
+
+Web server (Nginx): Listens on 80/443, terminates TLS, serves static assets, reverse-proxies dynamic requests to the app server.
+
+Application server (PHP-FPM): Runs the application logic (your code) and interacts with the database.
+
+Application files (your code base): The website/app code, e.g., at /var/www/foobar.
+
+Database (MySQL): Stores persistent data (users, posts, orders, etc.).
+
+How the server communicates with the user’s computer: HTTP/HTTPS over TCP/IP (HTTPS recommended).
+
+Ports & paths (quick reference)
+
+User ↔ Nginx: TCP 443 (HTTPS), 80 (HTTP → redirect to HTTPS).
+
+Nginx ↔ PHP-FPM: Unix socket (preferred) or TCP 9000.
+
+App ↔ MySQL: TCP 3306 (bind to 127.0.0.1).
+
+Code path: /var/www/foobar.
+
+Known issues with this design
+
+SPOF (Single Point of Failure): If this one server fails, everything is down.
+
+Maintenance downtime: Restarting Nginx/PHP-FPM/MySQL or deploying code causes visible downtime.
+
+Cannot scale for heavy traffic: CPU/RAM/I/O limited to one host; no load balancer or extra nodes to share load.
+
+Minimal DNS requirement (concept)
+; foobar.com zone
+www  IN  A  8.8.8.8
+
+Minimal Nginx idea (concept)
+
+server_name www.foobar.com;
+
+Listen on 80 and 443 ssl; (use a valid TLS cert)
+
+Serve /static/ from disk; pass dynamic requests to PHP-FPM (Unix socket or 127.0.0.1:9000).
