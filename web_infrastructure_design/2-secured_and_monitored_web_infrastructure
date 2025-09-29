@@ -1,0 +1,215 @@
+Goal: host www.foobar.com
+ on a 3-server setup that is secure, serves encrypted traffic (HTTPS), and is monitored.
+
+Topology:
+
+1 × Load Balancer (HAProxy) — public entry point
+
+2 × Backend servers — each runs Nginx (web) + App server (e.g., PHP-FPM) + MySQL (Primary on A, Replica on B)
+
+3 Firewalls: FW1 (edge), FW2 (DMZ/internal to app tier), FW3 (app→DB)
+
+1 SSL certificate for www.foobar.com
+ (served by HAProxy; optionally re-encrypt to backends)
+
+3 Monitoring clients/agents (one per server)
+
+Whiteboard diagram (ASCII)
+[ User Browser ]
+     |
+     |  https://www.foobar.com  (TLS)
+     v
++-------------------- DNS ---------------------+
+| www.foobar.com -> LB public IP (e.g., 8.8.8.8)
++---------------------------------------------+
+
+                Internet
+                   |
+                   v
+            [ FW1: Edge Firewall ]
+              allow: 80/443 to LB
+              drop: everything else
+                   |
+                   v
+        +===========================+
+        |     Load Balancer (LB)    |
+        |        HAProxy            |
+        |  - TLS termination (cert) |
+        |  - Health checks          |
+        |  - Roundrobin             |
+        |  - Monitoring agent       |
+        +===========================+
+                   |
+          (private network)
+                   |
+           [ FW2: App-tier Firewall ]
+        allow: LB -> backends (80/443 or 80 only if LB TLS-terminates)
+                   |
+        +-------------------+-------------------+
+        |                   |                   |
+        v                   |                   v
++==================+        |        +==================+
+|   Server A       |        |        |   Server B       |
+| 10.0.0.11        |        |        | 10.0.0.12        |
+|------------------|        |        |------------------|
+| Nginx (web)      |<-------+------->| Nginx (web)      |
+| App (PHP-FPM)    |                 | App (PHP-FPM)    |
+| App code         |                 | App code         |
+| MySQL PRIMARY    |   [ FW3: DB Firewall ]  MySQL REPL |
+| (writes)         | allow: App -> DB:3306 only         |
+| Monitoring agent |                 | Monitoring agent |
++==================+                 +==================+
+
+Notes:
+- SSL cert on LB for www.foobar.com (optionally re-encrypt LB->backends).
+- MySQL: Primary on A -> Replica on B (async replication).
+- Each node runs a monitoring client shipping logs/metrics.
+
+Request flow (happy path)
+
+User enters https://www.foobar.com
+ → DNS returns LB public IP.
+
+Traffic hits FW1, which only allows 80/443 to the LB.
+
+HAProxy accepts HTTPS, terminates TLS using the site certificate (optionally re-encrypts to backends).
+
+HAProxy (roundrobin) forwards to Server A or B (through FW2).
+
+Nginx serves static content; dynamic requests go to App server (PHP-FPM).
+
+App reads/writes data: writes to MySQL Primary on A, reads may go to Replica on B (if app supports read/write split). DB traffic is allowed through FW3 only on port 3306.
+
+Response → Nginx → HAProxy → encrypted back to the user.
+
+Why each additional element is added
+
+FW1 (Edge firewall): Protects the public edge. Only 80/443 to LB are open; reduces attack surface.
+
+FW2 (App-tier firewall): Segments the private network. Only the LB can reach backend Nginx/App ports; no lateral public access.
+
+FW3 (DB firewall): Enforces that only App processes reach MySQL on 3306; blocks all other DB access.
+
+SSL certificate on LB: Enables HTTPS for www.foobar.com
+, giving confidentiality, integrity, and authenticity.
+
+Monitoring clients (3): Collect logs/metrics from LB, Server A, Server B for visibility, alerting, and capacity planning.
+
+Explanations (required)
+What are firewalls for?
+
+Firewalls allow/deny network traffic based on rules. They reduce attack surface by permitting only the needed ports and sources. Here we use three layers to segment edge, app, and DB zones.
+
+Why is the traffic served over HTTPS?
+
+HTTPS (TLS) encrypts data in transit, preventing eavesdropping and tampering. It also authenticates the server (certificate) so users reach the real www.foobar.com
+ and not an impostor.
+
+What is monitoring used for?
+
+Monitoring observes health and performance: uptime, errors, latency, CPU/memory/disk, DB status, LB stats, logs. It enables alerts, debugging, trend analysis, and capacity planning before incidents occur.
+
+How is the monitoring tool collecting data?
+
+Each server runs a monitoring agent/client that:
+
+Tails logs (HAProxy, Nginx, app logs, MySQL slow/general logs) and ships them to a backend (e.g., Sumo Logic, Datadog, etc.).
+
+Collects metrics (system CPU/RAM/disk/net, Nginx/HAProxy counters, MySQL status) via native APIs, sockets, or exporters.
+
+Sends data securely over the network to the monitoring service for storage, dashboards, and alerts.
+
+How to monitor web server QPS (Queries Per Second / Requests Per Second)?
+
+Choose one (or combine):
+
+Log-based rate: ensure Nginx/HAProxy logs each request; the agent counts requests per time window (e.g., per second) → emits QPS metric.
+
+Nginx status / stub_status (or Prometheus exporter): scrape request counters and compute delta per second to get QPS.
+
+HAProxy stats (socket/CSV/HTTP): read frontend/backend req_tot counters; compute per-second rate.
+Then dashboard this metric and alert if QPS is too low (traffic drop) or too high (overload).
+
+Load balancer specifics
+
+Algorithm: roundrobin — cycles requests evenly across healthy backends A and B.
+
+Health checks: periodically probe backends; if a node fails checks, it’s removed from rotation until healthy.
+
+TLS: Terminate HTTPS at LB with the www.foobar.com
+ certificate; optionally re-encrypt LB→backend (mTLS or HTTPS) for end-to-end encryption inside the private network.
+
+Database Primary-Replica (Master-Slave)
+
+Primary on Server A accepts all writes and produces binary logs.
+
+Replica on Server B replays those logs to stay (eventually) in sync (asynchronous by default).
+
+App should send writes to Primary; reads can go to Primary or Replica (if the app tolerates replication lag).
+
+Difference (app perspective):
+
+Primary: authoritative, read/write endpoint.
+
+Replica: read-only endpoint; good for scaling reads and quicker failover.
+
+Ports & rules (quick reference)
+
+User → LB (through FW1): TCP 443 (HTTPS) and optionally 80 (redirect to HTTPS).
+
+LB → Backends (through FW2): TCP 80/443 to Nginx (choose one model: terminate at LB and use 80 to backends, or re-encrypt and use 443).
+
+App → DB (through FW3): TCP 3306 only, from backend hosts to the DB host/role.
+
+Monitoring agents → monitoring service: outbound TCP HTTPS (e.g., 443).
+
+What are the issues with this infrastructure? (you must explain)
+
+Why terminating SSL at the load balancer level is an issue
+
+If you decrypt at LB and send plaintext HTTP to backends, traffic on the internal network is not encrypted (risk if the network is compromised).
+
+Some client IP/TLS attributes may be lost unless forwarded via headers (e.g., X-Forwarded-For, X-Forwarded-Proto).
+Mitigation: re-encrypt LB→backends (end-to-end TLS) or isolate the network strictly.
+
+Why having only one MySQL server capable of accepting writes is an issue
+
+The Primary is a SPOF for writes. If it fails, writes stop until manual promotion of the Replica and re-pointing the app.
+
+It can also be a bottleneck under high write load.
+Mitigation: automate failover (or use managed HA), consider semi-sync replication, or adopt a multi-primary/clustered design if the app supports it.
+
+Why having servers with all the same components (DB, web, app) might be a problem
+
+Resource contention: DB workloads (I/O-heavy) can starve web/app processes on the same box.
+
+Blast radius: a failure or misconfiguration on one layer (e.g., DB crash) affects web/app on that node.
+
+Security & patching: larger attack surface per node; harder, riskier maintenance windows.
+
+Operational complexity: deployments and tuning for different components on the same machine can conflict.
+Mitigation: separate concerns (dedicated DB hosts), containerization, or at least strong cgroup limits and careful capacity planning.
+
+Minimal DNS & certificate (concept)
+; foobar.com zone
+www  IN  A  <LB public IP>
+
+
+Certificate: a valid TLS certificate for www.foobar.com
+ installed on HAProxy (and on backends if doing re-encryption).
+
+Security headers: enable HSTS, set modern TLS versions/ciphers.
+
+Monitoring checklist (concept)
+
+LB: HAProxy logs, health stats, TLS errors, 4xx/5xx rates.
+
+Web/App: Nginx access/error logs, app logs, latency, 5xx, worker saturation.
+
+DB: replication lag, connections, slow queries, buffer pool, disk I/O.
+
+System: CPU, RAM, disk, network, file descriptors.
+
+QPS: from HAProxy and/or Nginx counters/logs (see method above).
+
+Alerts: high 5xx, high latency, low QPS, Primary down, replication lag, disk nearly full.
