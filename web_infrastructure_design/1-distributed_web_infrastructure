@@ -1,0 +1,149 @@
+Goal: make www.foobar.com
+ highly available (compared to a single box) by adding a load balancer and two backend servers.
+Stack per backend: Nginx (web server) → Application server (e.g., PHP-FPM) → MySQL (database) with Primary-Replica across the two servers.
+DNS: www.foobar.com → public IP of the load balancer (e.g., 8.8.8.8).
+
+Whiteboard diagram (ASCII)
+[ User's Browser ]
+       |
+       |  https://www.foobar.com
+       v
++--------------------- DNS ----------------------+
+| www.foobar.com  ->  LB Public IP (8.8.8.8)     |
++------------------------------------------------+
+       |
+       v   TCP 80/443
++================== Load Balancer ==================+
+|                  HAProxy                         |
+|  - TLS termination (optional in this design)     |
+|  - Algorithm: roundrobin                         |
+|  - Health checks on backends                     |
++==================+===============================+
+                   |                       |
+                   | TCP 80/443            | TCP 80/443
+                   v                       v
+        +====================+    +====================+
+        |  Server A          |    |  Server B          |
+        |  (10.0.0.11)       |    |  (10.0.0.12)       |
+        |--------------------|    |--------------------|
+        |  Nginx (web)       |    |  Nginx (web)       |
+        |  PHP-FPM (app)     |    |  PHP-FPM (app)     |
+        |  App code (/var/   |    |  App code (/var/   |
+        |   www/foobar)      |    |   www/foobar)      |
+        |                    |    |                    |
+        |  MySQL PRIMARY  -> | -> |  MySQL REPLICA     |
+        |  (writes)          |    |  (reads/standby)   |
+        +====================+    +====================+
+
+Notes:
+- App code is deployed to both backends (A and B).
+- DB replication is PRIMARY (A) -> REPLICA (B), async by default.
+
+Why each additional element is added
+
+Load balancer (HAProxy):
+Distributes incoming requests across multiple backends to improve availability and throughput; allows health checks and graceful draining during deploys.
+
+Two backend servers (A & B):
+Reduces risk that a single machine failure takes down the site; supports horizontal scaling for the web/app layer.
+
+Database Primary-Replica across A & B:
+Improves availability for reads and prepares for faster recovery; lets you offload some read traffic to the replica (if app supports read/write split).
+
+Request flow (happy path)
+
+User hits www.foobar.com. DNS returns the LB public IP (8.8.8.8).
+
+The browser opens HTTP/HTTPS to the HAProxy.
+
+HAProxy selects a healthy backend using roundrobin and forwards the request to Nginx on Server A or B.
+
+Nginx serves static assets directly and forwards dynamic requests to PHP-FPM.
+
+Application code runs.
+
+Writes go to MySQL PRIMARY (Server A in this design).
+
+Reads can go to PRIMARY or REPLICA (Server B) if the app supports read/write splitting and can handle eventual consistency.
+
+Response is returned back through Nginx → HAProxy → user.
+
+Load balancer specifics
+
+Algorithm: roundrobin
+HAProxy cycles through the list of healthy backends in turn: A, then B, then A, then B… This evens out request counts when requests are similar in cost.
+
+Active-Active vs. Active-Passive at the app tier
+
+Active-Active (this design): both Server A and Server B accept live traffic simultaneously behind HAProxy. If one fails, the other continues serving.
+
+Active-Passive: only one backend serves traffic at a time; the other is on standby. Failover promotes the passive node to active when needed.
+
+This design uses Active-Active for the web/app layer (via HAProxy).
+Note: The database layer is Primary-Replica, which is inherently Active-Passive for writes (only the primary accepts writes).
+
+Database Primary-Replica (Master-Slave) — how it works
+
+Replication direction: PRIMARY (A) → REPLICA (B).
+
+Mechanics (conceptual):
+The PRIMARY records data changes (binlogs). The REPLICA reads and replays those logs to stay (eventually) synchronized.
+
+Consistency: usually asynchronous; the REPLICA may lag briefly behind the PRIMARY.
+
+Writes vs. reads from the app:
+
+Writes (INSERT/UPDATE/DELETE, schema changes) must go to PRIMARY.
+
+Reads (SELECT) can go to REPLICA if your application does read/write splitting and tolerates slight replication lag.
+
+Difference between PRIMARY and REPLICA (from the app’s perspective)
+
+PRIMARY: the single source of truth for writes; also serves reads if needed.
+
+REPLICA: read-only target for SELECT queries; cannot accept writes; used to scale reads and as a standby for failover.
+
+Ports & protocols (quick reference)
+
+User ↔ HAProxy: TCP 443 (HTTPS) / 80 (HTTP).
+
+HAProxy ↔ Nginx (backends): TCP 443/80 (matching what Nginx listens on).
+
+Nginx ↔ App (PHP-FPM): Unix socket or TCP 9000.
+
+App ↔ MySQL: TCP 3306 (local socket on each host; app uses the PRIMARY’s endpoint for writes).
+
+What are the issues (limitations) with this design?
+Single Points of Failure (SPOF)
+
+The load balancer itself: only one HAProxy instance; if it fails, the entire site is unreachable.
+
+Database PRIMARY: if Server A (PRIMARY) dies, writes stop until you promote the REPLICA to PRIMARY and reconfigure the app/HAProxy or DNS; this is a manual or semi-manual process without orchestration.
+
+DNS with a single A record: if the LB public IP is down, DNS has no alternate target.
+
+Shared state (if any): if sessions/files are stored locally on a single backend, requests routed to the other backend won’t see them (session loss, missing uploads).
+
+Security issues
+
+No firewall: all ports may be exposed; should restrict inbound to 80/443 on LB only, and limit backend ports to private subnets/security groups.
+
+No HTTPS (as stated in the constraint): traffic is unencrypted; credentials and cookies can be intercepted. TLS termination should be enabled on HAProxy (or end-to-end).
+
+No monitoring
+
+No metrics/alerts/log aggregation (e.g., no Prometheus/Grafana, no ELK/EFK, no uptime checks).
+
+Failures or saturation won’t be detected early; troubleshooting is harder.
+
+Operational notes (conceptual, not required but useful)
+
+Deployments: deploy app code to both backends; drain one backend from HAProxy, update/restart it, run smoke tests, then put it back and repeat on the other (minimizes user impact).
+
+DB failover: pre-document steps to promote REPLICA to PRIMARY, update app connection strings/endpoints, and re-establish replication.
+
+State management: prefer stateless app nodes; store sessions in a shared store (e.g., Redis) or use sticky sessions (trade-offs). Store uploads in object storage if possible.
+
+Minimal DNS requirement (concept)
+; foobar.com zone
+www  IN  A  8.8.8.8    ; LB public IP
