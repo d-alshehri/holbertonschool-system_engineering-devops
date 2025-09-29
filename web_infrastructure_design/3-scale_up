@@ -1,0 +1,107 @@
+Goal: improve availability, scalability, and clarity of responsibilities by splitting components into dedicated servers and clustering the load balancer.
+
+Whiteboard diagram (ASCII)
+[ User Browser ]
+      |
+      |  https://www.foobar.com
+      v
++------------------- DNS -------------------+
+| www.foobar.com -> LB cluster public IP    |
++-------------------------------------------+
+
+                Internet
+                    |
+                    v
+          +=====================+
+          |   HAProxy LB #1     |
+          |   HAProxy LB #2     |
+          |   Clustered (active- |
+          |   active or passive) |
+          +=====================+
+                    |
+                    v
+          -----------------------
+          |                     |
+          v                     v
+ +=================+     +=================+
+ |   Web server    |     |   Web server    |
+ |   Nginx only    |     |   Nginx only    |
+ +=================+     +=================+
+          |
+          v
+ +=================+
+ | Application srv |
+ | App server only |
+ | (e.g., PHP-FPM) |
+ +=================+
+          |
+          v
+ +=================+
+ |   Database srv  |
+ |   MySQL only    |
+ +=================+
+
+Why each additional element is added
+
+Second load balancer (HAProxy #2, clustered):
+
+Avoids a Single Point of Failure (SPOF) at the load-balancing tier.
+
+If LB #1 fails, LB #2 continues serving traffic.
+
+Cluster can be active-active (both serving simultaneously) or active-passive (one hot standby).
+
+Dedicated web server(s):
+
+Runs only Nginx.
+
+Separates static file serving and request proxying from app logic.
+
+Increases performance and allows independent scaling of the web tier.
+
+Dedicated application server:
+
+Runs the application runtime (e.g., PHP-FPM, Node.js, etc.).
+
+Separating it from Nginx makes the boundary clear between web server (handles HTTP, static files) and application server (executes business logic, dynamic responses).
+
+This improves security and isolation (fewer dependencies on each machine).
+
+Dedicated database server:
+
+Runs only MySQL.
+
+Separating DB improves stability: heavy queries won’t steal CPU/RAM from app/web processes.
+
+Allows independent DB scaling, replication, and backup strategies.
+
+Application server vs. Web server
+
+Web server (Nginx):
+
+Handles HTTP requests directly.
+
+Serves static content (HTML, CSS, JS, images).
+
+Acts as a reverse proxy to forward dynamic requests to the application server.
+
+Application server (e.g., PHP-FPM, Node.js, Tomcat):
+
+Executes the application code base.
+
+Generates dynamic content (database queries, business logic).
+
+Returns responses back to the web server, which then passes them to the client.
+
+(Reference: F5 Glossary — Application Server vs. Web Server
+)
+
+Benefits of this scaled-up design
+
+Reduces SPOFs: clustered LBs ensure the site is still reachable if one fails.
+
+Clear separation of concerns: web, app, and DB layers can be tuned, secured, and scaled independently.
+
+Better scalability: add more web servers behind the LB, or scale DB vertically/horizontally as needed.
+
+Operational clarity: easier monitoring, maintenance, and troubleshooting since each tier has a dedicated role.
